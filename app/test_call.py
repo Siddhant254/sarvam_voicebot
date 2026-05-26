@@ -47,17 +47,29 @@ def record_audio(duration: int = 5) -> tuple[bytes, bool]:
 async def simulate_call():
     uri = "ws://127.0.0.1:8000/ws/call/CALL-001?mobile_number=9876543210"
 
-    async with websockets.connect(uri) as websocket:
+    async with websockets.connect(
+        uri,
+        ping_interval=60,
+        ping_timeout=120,
+        open_timeout=30
+    ) as websocket:
         print("📞 Call connected!")
 
         while True:
-            # Receive bot audio and play
-            bot_audio = await websocket.recv()
+            try:
+                # Wait up to 30s for bot response
+                bot_audio = await asyncio.wait_for(websocket.recv(), timeout=30)
+            except asyncio.TimeoutError:
+                print("⏰ Server timeout — no response received")
+                break
+            except websockets.exceptions.ConnectionClosedError as e:
+                print(f"❌ Connection closed: {e}")
+                break
+
             if isinstance(bot_audio, bytes):
                 print("🤖 Bot speaking...")
                 play_audio(bot_audio)
 
-            # Record farmer response
             farmer_audio, silent = record_audio(duration=5)
 
             if silent:
@@ -66,7 +78,6 @@ async def simulate_call():
             else:
                 print("📤 Sending your response...")
                 await websocket.send(farmer_audio)
-
 
 asyncio.run(simulate_call())
 
