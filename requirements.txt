@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+sarvamai
+python-dotenv
+numpy
+sounddevice
+websockets
+rapidfuzz
+deep-translator

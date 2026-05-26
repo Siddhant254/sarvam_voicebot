@@ -1,0 +1,5 @@
+timestamp,session_id,phone_number,language,auth_validated,crop_name,crop_stage,loss_date,reason,ticket_number,total_turns
+2026-05-21T13:02:23.675276,a1565794-9416-49ae-8294-79a27b95de3a, 919876543210,Not Selected,No,N/A,N/A,N/A,N/A,N/A,1
+2026-05-21T13:02:42.795624,f0ed72bb-5503-468d-a2de-bf4b797ab609, 919876543210,Not Selected,No,N/A,N/A,N/A,N/A,N/A,1
+2026-05-21T13:03:20.844529,184246c3-e091-479b-b7de-608df7015560, 919876543210,hi-IN,Yes,Cotton,Flowering stage,18th May 2026,Excessive rainfall,TKT-85261,8
+2026-05-21T13:03:35.718106,cf8e7c07-2d60-45cd-9a11-b33d48d9a0c9, 919876543210,mr-IN,Yes,N/A,N/A,N/A,N/A,N/A,4
