@@ -100,11 +100,13 @@ def process_input(session: CallSession, user_input: str) -> str:
         ) if matched_name else None
 
         if farmer:
-            session.farmer_record  = farmer
-            session.mobile_number  = farmer["mobile_number"]
-            session.step           = CallStep.AUTH
-            # auth_substep starts as None; AUTH handler will set it to "AADHAAR"
-            return get_prompt("auth_prompt", lang)
+            session.farmer_record   = farmer
+            session.mobile_number   = farmer["mobile_number"]
+            session.step            = CallStep.AUTH
+            session.auth_substep    = "MOBILE"          # start with mobile last‑4
+            session.auth_retries    = 0               # reset retry counter for this field
+            
+            return get_prompt("ask_mobile_last4", lang) # ask mobile last‑4 immediately
         else:
             session.name_retries += 1
             if session.name_retries >= MAX_NAME_RETRIES:
@@ -113,50 +115,73 @@ def process_input(session: CallSession, user_input: str) -> str:
             return get_prompt("name_not_matched", lang)
 
     # ── AUTH ──────────────────────────────────────────────────────────────────
+        # ── AUTH ──────────────────────────────────────────────────────────────────
     if session.step == CallStep.AUTH:
 
         if not session.farmer_record:
             session.step = CallStep.ESCALATE
             return get_prompt("auth_max_retries", lang)
 
-        # ── First entry: ask for Aadhaar last-4 ──────────────────────────────
-        if session.auth_substep is None:
-            session.auth_substep = "AADHAAR"
-            return get_prompt("ask_aadhaar", lang)
+        # ---------- MOBILE last‑4 ----------
+        if session.auth_substep == "MOBILE":
+            digits = get_last_4(user_input)
 
-        # ── Aadhaar verification ─────────────────────────────────────────────
-        # get_last_4() normalises Devanagari numerals, Hindi word-numbers,
-        # English word-numbers, and plain ASCII digits automatically.
+            # Compare with last 4 digits of the stored mobile number
+            mobile_last4 = session.farmer_record.get("mobile_number", "")[-4:]
+
+            if digits and digits == mobile_last4:
+                # Success – move to Aadhaar step
+                session.auth_substep = "AADHAAR"
+                session.auth_retries = 0
+                return get_prompt("ask_aadhaar", lang)
+            else:
+                session.auth_retries += 1
+                if session.auth_retries >= Config.MAX_AUTH_RETRIES:
+                    session.step = CallStep.ESCALATE
+                    session.auth_substep = None
+                    return get_prompt("auth_max_retries", lang)
+                return get_prompt("auth_failed", lang)
+
+        # ---------- AADHAAR last‑4 ----------
         if session.auth_substep == "AADHAAR":
-            aadhaar_last4 = get_last_4(user_input)
+            digits = get_last_4(user_input)
+            aadhaar_last4 = session.farmer_record.get("aadhaar_last4", "")
 
-            if aadhaar_last4 and aadhaar_last4 == session.farmer_record.get("aadhaar_last4"):
+            if digits and digits == aadhaar_last4:
+                # Success – move to Policy step
                 session.auth_substep = "POLICY"
+                session.auth_retries = 0
                 return get_prompt("ask_policy", lang)
             else:
                 session.auth_retries += 1
                 if session.auth_retries >= Config.MAX_AUTH_RETRIES:
-                    session.step         = CallStep.ESCALATE
+                    session.step = CallStep.ESCALATE
                     session.auth_substep = None
                     return get_prompt("auth_max_retries", lang)
                 return get_prompt("auth_failed", lang)
 
-        # ── Policy verification ───────────────────────────────────────────────
+        # ---------- POLICY last‑4 ----------
         if session.auth_substep == "POLICY":
-            policy_last4 = get_last_4(user_input)
+            digits = get_last_4(user_input)
+            policy_last4 = session.farmer_record.get("policy_last4", "")
 
-            if policy_last4 and policy_last4 == session.farmer_record.get("policy_last4"):
-                session.auth_passed  = True
+            if digits and digits == policy_last4:
+                # Full authentication passed
+                session.auth_passed = True
                 session.auth_substep = None
-                session.step         = CallStep.USE_CASE_SELECT
+                session.step = CallStep.USE_CASE_SELECT
                 return get_prompt("use_case_menu", lang)
             else:
                 session.auth_retries += 1
                 if session.auth_retries >= Config.MAX_AUTH_RETRIES:
-                    session.step         = CallStep.ESCALATE
+                    session.step = CallStep.ESCALATE
                     session.auth_substep = None
                     return get_prompt("auth_max_retries", lang)
                 return get_prompt("auth_failed", lang)
+
+        # Fallback (should never happen)
+        session.step = CallStep.ESCALATE
+        return get_prompt("auth_max_retries", lang)
 
     # ── USE CASE SELECT ───────────────────────────────────────────────────────
     if session.step == CallStep.USE_CASE_SELECT:
