@@ -9,5 +9,5 @@ class Config:
     SARVAM_API_KEY    = os.getenv("SARVAM_API_KEY", "")
     STT_MODEL         = "saaras:v3"
     DEFAULT_LANGUAGE  = "hi-IN"
-    MAX_AUTH_RETRIES  = 2
+    MAX_AUTH_RETRIES  = 3
     APP_NAME          = "KRPH Voicebot"

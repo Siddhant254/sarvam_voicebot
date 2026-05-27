@@ -19,7 +19,7 @@ def transcribe_audio(file_path: str, language: str = Config.DEFAULT_LANGUAGE) ->
     with open(file_path, "rb") as f:
         response = client.speech_to_text.transcribe(
             file=f,
-            model="saaras:v3",
+            model="saarika:v2.5",
             mode="transcribe",
         )
     return response.transcript

@@ -17,6 +17,9 @@ DEVANAGARI_DIGIT_MAP = str.maketrans("०१२३४५६७८९", "01234567
 HINDI_WORD_TO_DIGIT: dict[str, str] = {
     # Hindi
     "शून्य": "0",
+    "ज़िरो": "0",
+    "ज़ीरो": "0",
+    "ज़ीरो": "0",
     "एक":   "1",
     "दो":   "2",
     "तीन":  "3",

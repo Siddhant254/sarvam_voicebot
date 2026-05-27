@@ -18,8 +18,8 @@ def text_to_speech(text: str, language: str = Config.DEFAULT_LANGUAGE) -> bytes:
     response = client.text_to_speech.convert(
         text=text,
         target_language_code=language,
-        speaker="manisha",
-        model="bulbul:v2",
+        speaker="shruti",
+        model="bulbul:v3",
         enable_preprocessing=True
     )
     
