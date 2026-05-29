@@ -1,1 +1,22 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environment
 .env
+.env.local
+venv/
+env/
+
+# Django
+*.sqlite3
+/staticfiles/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
