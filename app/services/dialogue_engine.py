@@ -1,10 +1,10 @@
 # app/services/dialogue_engine.py
 
 from app.models.call_session import CallSession, CallStep, Language
-from app.services.farmer_service import get_all_farmers
+from app.services.farmer_service import fetch_farmer_full_record
 from app.services.prompts import get_prompt
 from app.core.config import Config
-from app.utils.text_match import best_match, get_last_4
+from app.utils.text_match import best_match, get_last_4, extract_digits
 
 
 # ---------------------------------------------------------------------------
@@ -14,11 +14,9 @@ from app.utils.text_match import best_match, get_last_4
 MAX_LANGUAGE_RETRIES = 3
 MAX_NAME_RETRIES     = 3
 
-# Known vocabulary lists – extend these as your DB grows.
-# These are matched against STT output (Hindi/Marathi/English) using best_match().
 KNOWN_CROPS = [
     "Grapes", "Wheat", "Cotton", "Soybean", "Onion",
-    "Sugarcane", "Rice", "Jowar", "Bajra", "Tur",
+    "Sugarcane", "Rice", "Jowar", "Bajra", "Tur", "Paddy",
 ]
 
 KNOWN_STAGES = [
@@ -40,11 +38,16 @@ def _is_empty(text: str) -> bool:
     return text.strip() == "" or len(text.strip()) < 2
 
 
+def _resolve_lang(session: CallSession) -> str:
+    """Always returns a plain string language code, never an enum."""
+    if session.language == Language.HINDI:
+        return "hi-IN"
+    elif session.language == Language.MARATHI:
+        return "mr-IN"
+    return "hi-IN"
+
+
 def _match_from_list(user_input: str, known_list: list[str], threshold: int = 55) -> str:
-    """
-    Try to match STT input to a known vocabulary list.
-    Falls back to raw user_input if nothing matches (so data is never lost).
-    """
     matched = best_match(user_input, known_list, threshold=threshold)
     return matched if matched else user_input
 
@@ -55,7 +58,7 @@ def _match_from_list(user_input: str, known_list: list[str], threshold: int = 55
 
 def process_input(session: CallSession, user_input: str) -> str:
 
-    lang = session.language or "hi-IN"
+    lang = _resolve_lang(session)
 
     # ── WELCOME ──────────────────────────────────────────────────────────────
     if session.step == CallStep.WELCOME:
@@ -89,24 +92,34 @@ def process_input(session: CallSession, user_input: str) -> str:
                 session.step = CallStep.END
                 return get_prompt("call_disconnecting", lang)
             return get_prompt("name_retry", lang)
+        
+        if not session.mobile_number:
+            print("[ERROR] No mobile number in session — cannot fetch farmer")
+            session.step = CallStep.ESCALATE
+            return get_prompt("auth_max_retries", lang)
 
-        # Fetch all farmers and fuzzy-match against DB names.
-        # best_match() handles Hindi/Marathi STT via translate → fuzzy pipeline.
-        all_farmers     = get_all_farmers()
-        candidate_names = [f["farmer_name"] for f in all_farmers]
-        matched_name    = best_match(user_input, candidate_names, threshold=60)
-        farmer          = next(
-            (f for f in all_farmers if f["farmer_name"] == matched_name), None
-        ) if matched_name else None
+        # Fetch farmer record + policy (merged) using mobile number from call
+        farmer = fetch_farmer_full_record(session.mobile_number)
 
-        if farmer:
-            session.farmer_record   = farmer
-            session.mobile_number   = farmer["mobile_number"]
-            session.step            = CallStep.AUTH
-            session.auth_substep    = "MOBILE"          # start with mobile last‑4
-            session.auth_retries    = 0               # reset retry counter for this field
-            
-            return get_prompt("ask_mobile_last4", lang) # ask mobile last‑4 immediately
+        if not farmer:
+            # API failed — retry name input
+            session.name_retries += 1
+            if session.name_retries >= MAX_NAME_RETRIES:
+                session.step = CallStep.ESCALATE
+                return get_prompt("auth_max_retries", lang)
+            return get_prompt("name_not_matched", lang)
+
+        # Loosely verify spoken name matches DB name
+        print(f"[DEBUG] Spoken name  : {user_input!r}")
+        print(f"[DEBUG] DB name      : {farmer['farmer_name']!r}")
+
+        matched = best_match(user_input, [farmer["farmer_name"]], threshold=50)
+        print(f"[DEBUG] Name matched : {matched!r}")
+
+        if matched:
+            session.farmer_record = farmer
+            session.step          = CallStep.AUTH
+            return get_prompt("auth_prompt", lang)
         else:
             session.name_retries += 1
             if session.name_retries >= MAX_NAME_RETRIES:
@@ -115,112 +128,95 @@ def process_input(session: CallSession, user_input: str) -> str:
             return get_prompt("name_not_matched", lang)
 
     # ── AUTH ──────────────────────────────────────────────────────────────────
-        # ── AUTH ──────────────────────────────────────────────────────────────────
     if session.step == CallStep.AUTH:
 
         if not session.farmer_record:
             session.step = CallStep.ESCALATE
             return get_prompt("auth_max_retries", lang)
 
-        # ---------- MOBILE last‑4 ----------
-        if session.auth_substep == "MOBILE":
-            digits = get_last_4(user_input)
+        # First entry → ask policy last 4
+        if session.auth_substep is None:
+            session.auth_substep = "POLICY"
+            return get_prompt("ask_policy_no", lang)
 
-            # Compare with last 4 digits of the stored mobile number
-            mobile_last4 = session.farmer_record.get("mobile_number", "")[-4:]
-
-            if digits and digits == mobile_last4:
-                # Success – move to Aadhaar step
-                session.auth_substep = "AADHAAR"
-                session.auth_retries = 0
-                return get_prompt("ask_aadhaar", lang)
-            else:
-                session.auth_retries += 1
-                if session.auth_retries >= Config.MAX_AUTH_RETRIES:
-                    session.step = CallStep.ESCALATE
-                    session.auth_substep = None
-                    return get_prompt("auth_max_retries", lang)
-                return get_prompt("auth_failed", lang)
-
-        # ---------- AADHAAR last‑4 ----------
-        if session.auth_substep == "AADHAAR":
-            digits = get_last_4(user_input)
-            aadhaar_last4 = session.farmer_record.get("aadhaar_last4", "")
-
-            if digits and digits == aadhaar_last4:
-                # Success – move to Policy step
-                session.auth_substep = "POLICY"
-                session.auth_retries = 0
-                return get_prompt("ask_policy", lang)
-            else:
-                session.auth_retries += 1
-                if session.auth_retries >= Config.MAX_AUTH_RETRIES:
-                    session.step = CallStep.ESCALATE
-                    session.auth_substep = None
-                    return get_prompt("auth_max_retries", lang)
-                return get_prompt("auth_failed", lang)
-
-        # ---------- POLICY last‑4 ----------
+        # ── Policy verification ───────────────────────────────────────────────
         if session.auth_substep == "POLICY":
-            digits = get_last_4(user_input)
-            policy_last4 = session.farmer_record.get("policy_last4", "")
+            policy_last4 = get_last_4(user_input)
+            policy_id    = (session.farmer_record.get("policy_data") or {}).get("policy_id", "")
+            expected     = policy_id[-4:] if policy_id else ""
 
-            if digits and digits == policy_last4:
-                # Full authentication passed
-                session.auth_passed = True
+            print(f"[DEBUG] Policy input     : {user_input!r}")
+            print(f"[DEBUG] Extracted last-4 : {policy_last4!r}")
+            print(f"[DEBUG] Expected last-4  : {expected!r}")
+
+            if not expected:
+                print(f"[WARN] Policy ID not available — escalating")
+                session.step         = CallStep.ESCALATE
                 session.auth_substep = None
-                session.step = CallStep.USE_CASE_SELECT
+                return get_prompt("auth_max_retries", lang)
+
+            if policy_last4 and policy_last4 == expected:
+                # Policy matched → move to application number
+                session.auth_substep  = "APP_NO"
+                session.auth_retries  = 0        # reset retries for next step
+                return get_prompt("ask_app_no", lang)
+            else:
+                session.auth_retries += 1
+                if session.auth_retries >= Config.MAX_AUTH_RETRIES:
+                    session.step         = CallStep.ESCALATE
+                    session.auth_substep = None
+                    return get_prompt("auth_max_retries", lang)
+                return get_prompt("auth_failed", lang)
+
+        # ── Application number verification ───────────────────────────────────
+        if session.auth_substep == "APP_NO":
+            app_last4   = get_last_4(user_input)
+            app_no      = (session.farmer_record.get("policy_data") or {}).get("application_no", "")
+            expected    = app_no[-4:] if app_no else ""
+
+            print(f"[DEBUG] App No input     : {user_input!r}")
+            print(f"[DEBUG] Extracted last-4 : {app_last4!r}")
+            print(f"[DEBUG] Expected last-4  : {expected!r}")
+
+            if not expected:
+                print(f"[WARN] Application number not available — escalating")
+                session.step         = CallStep.ESCALATE
+                session.auth_substep = None
+                return get_prompt("auth_max_retries", lang)
+
+            if app_last4 and app_last4 == expected:
+                # Both verified → authenticated
+                session.auth_passed  = True
+                session.auth_substep = None
+                session.step         = CallStep.USE_CASE_SELECT
                 return get_prompt("use_case_menu", lang)
             else:
                 session.auth_retries += 1
                 if session.auth_retries >= Config.MAX_AUTH_RETRIES:
-                    session.step = CallStep.ESCALATE
+                    session.step         = CallStep.ESCALATE
                     session.auth_substep = None
                     return get_prompt("auth_max_retries", lang)
                 return get_prompt("auth_failed", lang)
-
-        # Fallback (should never happen)
-        session.step = CallStep.ESCALATE
-        return get_prompt("auth_max_retries", lang)
-
-    # ── USE CASE SELECT ───────────────────────────────────────────────────────
-    if session.step == CallStep.USE_CASE_SELECT:
-        # Currently both options lead to DATA_CAPTURE.
-        # Extend with elif branches when more use-cases are added.
-        if "1" in user_input or "एक" in user_input:
-            session.step = CallStep.DATA_CAPTURE
-            return get_prompt("ask_crop_name", lang)
-        else:
-            session.step = CallStep.DATA_CAPTURE
-            return get_prompt("ask_crop_name", lang)
-
     # ── DATA CAPTURE ──────────────────────────────────────────────────────────
-    # Each field is collected in sequence.
-    # best_match / _match_from_list handle Hindi/Marathi STT for all fields.
     if session.step == CallStep.DATA_CAPTURE:
 
         if not session.grievance.crop_name:
-            # Match against known crop vocabulary; fall back to raw input
-            session.grievance.crop_name = _match_from_list(
-                user_input, KNOWN_CROPS, threshold=55
-            )
+            session.grievance.crop_name = _match_from_list(user_input, KNOWN_CROPS, threshold=55)
+            print(f"[DEBUG] Crop name   : {user_input!r} → {session.grievance.crop_name!r}")
             return get_prompt("ask_crop_stage", lang)
 
         if not session.grievance.crop_stage:
-            session.grievance.crop_stage = _match_from_list(
-                user_input, KNOWN_STAGES, threshold=55
-            )
+            session.grievance.crop_stage = _match_from_list(user_input, KNOWN_STAGES, threshold=55)
+            print(f"[DEBUG] Crop stage  : {user_input!r} → {session.grievance.crop_stage!r}")
             return get_prompt("ask_loss_date", lang)
 
         if not session.grievance.loss_date:
-            # Date is stored as-is (STT date parsing is a separate concern)
             session.grievance.loss_date = user_input.strip()
             return get_prompt("ask_loss_reason", lang)
 
         if not session.grievance.loss_reason:
-            session.grievance.loss_reason = _match_from_list(
-                user_input, KNOWN_LOSS_REASONS, threshold=55
-            )
+            session.grievance.loss_reason = _match_from_list(user_input, KNOWN_LOSS_REASONS, threshold=55)
+            print(f"[DEBUG] Loss reason : {user_input!r} → {session.grievance.loss_reason!r}")
             session.step = CallStep.TICKET_CREATE
             return get_prompt("ticket_created", lang, ticket_id="TKT-12345")
 
@@ -231,30 +227,3 @@ def process_input(session: CallSession, user_input: str) -> str:
 
     # ── FALLBACK ──────────────────────────────────────────────────────────────
     return get_prompt("goodbye", lang)
-
-
-# ---------------------------------------------------------------------------
-# Quick smoke-test  (python -m app.services.dialogue_engine)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    from app.models.call_session import CallSession
-
-    session = CallSession(call_id="CALL-001", mobile_number="9876543210")
-
-    test_inputs = [
-        ("Step 1 – trigger welcome",          ""),
-        ("Step 2 – select Hindi",             "1"),
-        ("Step 3 – name in Hindi",            "रमेश पाटील"),   # Hindi STT
-        ("Step 4 – Aadhaar last-4 (words)",   "नौ आठ सात छह"), # Hindi word-numbers
-        ("Step 5 – Policy last-4 (Devangari)","९०१२"),          # Devanagari numerals
-        ("Step 6 – use-case",                 "1"),
-        ("Step 7 – crop name in Hindi",       "अंगूर"),         # Grapes
-        ("Step 8 – crop stage in Hindi",      "खड़ी फसल"),      # Standing
-        ("Step 9 – loss date",                "01-01-2025"),
-        ("Step 10 – loss reason in Hindi",    "ओलावृष्टि"),     # Hailstorm
-    ]
-
-    for label, inp in test_inputs:
-        response = process_input(session, inp)
-        print(f"{label}\n  Input   : {inp!r}\n  Response: {response}\n")
